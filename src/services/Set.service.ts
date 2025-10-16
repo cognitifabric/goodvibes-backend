@@ -4,8 +4,8 @@ import SetRepository from "../repos/Set.repository";
 import UserRepository from "../repos/User.repository";
 import SpotifyService from "./Spotify.service";
 import TrackServiceCache from './TrackCache.service';
-
-//// SCHEMAS AND INTERFACES
+import { Set as SetModel } from "../models/set.model";
+import type { SetSong } from "../models/set.model";
 import { ICreateSetInput } from "../interfaces/set.interface";
 
 function looksLikeSpotifyId(id: string) {
@@ -20,23 +20,31 @@ export default class SetService {
   constructor(private set: SetRepository, private user: UserRepository, private spotify: SpotifyService, private cache: TrackServiceCache
   ) { }
 
-  async createSet(creatorId: string, dto: ICreateSetInput) {
+  async createSet(userId: string, input: ICreateSetInput) {
+    // build document payload explicitly so images/tags/songs are persisted
+    const toSave = {
+      name: input.name,
+      description: input.description ?? undefined,
+      // now persisting full song objects (id, title, artists, image)
+      songs: input.songs ?? [],
+      tags: input.tags ?? [],
+      collaborators: input.collaborators ?? [],
+      images: input.images ?? [],
+      createdBy: userId,
+    };
 
-    const songs = Array.from(new Set((dto.songs ?? [])));
-    const collaborators = (dto.collaborators ?? []).filter(Boolean);
+    const doc = new SetModel(toSave);
+    await doc.save();
 
-    const set = await this.set.create({
-      name: dto.name,
-      description: dto.description,
-      songs,
-      tags: dto.tags,
-      collaborators,
-      createdBy: creatorId,
-    });
+    // ensure the user's `sets` array includes this new set
+    try {
+      await this.user.pushSet(userId, doc._id.toString());
+    } catch (err) {
+      // log but don't fail creation — consider rolling back if you need strict consistency
+      console.warn("Failed to push set id to user.sets:", err);
+    }
 
-    await this.user.pushSet(creatorId, set._id as any);
-    return set;
-
+    return doc.toObject();
   }
 
   private async assertCanEdit(setId: string, userId: string) {
@@ -52,10 +60,12 @@ export default class SetService {
 
     console.log("Set before adding songs", set);
 
-    const current: string[] = set.songs ?? [];
+    // current is an array of song objects
+    const current: SetSong[] = (set.songs ?? []) as SetSong[];
+    const currentIds = current.map(s => s.id);
 
     // 1) dedupe incoming & skip ones already present (preserve order of incoming)
-    const incoming = Array.from(new Set(trackIds)).filter(id => !current.includes(id));
+    const incoming = Array.from(new Set(trackIds)).filter(id => !currentIds.includes(id));
 
     if (incoming.length === 0) {
       return { songs: current, added: 0, addedTracks: [], skipped: [] };
@@ -70,11 +80,21 @@ export default class SetService {
     const skipped = incoming.filter(id => !validIds.includes(id));
 
     // 4) append only valid new IDs, preserve order
-    const next = current.concat(validIds);
+    // Convert hydrated items to SetSong objects (be defensive about property names)
+    const toAdd: SetSong[] = hydrated.map((h: any) => ({
+      id: h.trackId,
+      title: h.title ?? h.name ?? h.trackName ?? "",
+      artists: Array.isArray(h.artists) ? h.artists.join(", ") : (h.artists ?? (h.artistName ?? "")),
+      image:
+        h.image ??
+        h.albumImage ??
+        (h.album && Array.isArray(h.album.images) && h.album.images[0] ? h.album.images[0].url : undefined),
+    })).filter(s => !!s.id);
+
+    const next: SetSong[] = current.concat(toAdd);
     await this.set.setSongs(setId, next);
 
-    return { songs: next, added: validIds.length, addedTracks: hydrated, skipped };
-
+    return { songs: next, added: toAdd.length, addedTracks: hydrated, skipped };
   }
 
   // src/services/Set.service.ts (add)
@@ -84,24 +104,29 @@ export default class SetService {
     const set = await this.set.findById(setId);
     if (!set) throw new Error("Set not found");
 
-    const current = set.songs ?? [];
+    const current: SetSong[] = (set.songs ?? []) as SetSong[];
+    const currentIds = current.map(s => s.id);
 
     // Only allow reordering/removal here (no additions via this endpoint).
     // Drop any IDs that aren’t in current; de-dupe while preserving order.
-    const currentSet = new Set(current);
-    const next: string[] = [];
+    const nextIds: string[] = [];
     for (const id of finalOrder) {
-      if (currentSet.has(id) && !next.includes(id)) next.push(id);
+      if (currentIds.includes(id) && !nextIds.includes(id)) nextIds.push(id);
     }
 
-    console.log("current", current, "finalOrder", finalOrder, "next", next);
+    // Map ids back to song objects preserving metadata
+    const idToSong = new Map(current.map(s => [s.id, s]));
+    const next: SetSong[] = nextIds.map(id => idToSong.get(id)!).filter(Boolean);
+
+    console.log("currentIds", currentIds, "finalOrder", finalOrder, "nextIds", nextIds);
+
     // (Optional strict mode)
     // If finalOrder contains any id not in current, treat as error:
     // const unknown = finalOrder.filter(id => !currentSet.has(id));
     // if (unknown.length) throw new Error(`Unknown ids in final order: ${unknown.join(",")}`);
 
-    const removed = current.filter(id => !next.includes(id));
-    const orderChanged = JSON.stringify(current) !== JSON.stringify(next);
+    const removed = current.filter(s => !nextIds.includes(s.id));
+    const orderChanged = JSON.stringify(currentIds) !== JSON.stringify(nextIds);
 
     await this.set.setSongs(setId, next);
 

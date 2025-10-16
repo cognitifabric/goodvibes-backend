@@ -20,8 +20,6 @@ export default class AuthXController implements interfaces.Controller {
   @httpPost("/start")
   async start(req: Request, res: Response) {
 
-    console.log('body', req.body)
-
     const {
       redirect = process.env.APP_ORIGIN ? `${process.env.APP_ORIGIN}/oauth/x/callback` : "http://localhost:3000/oauth/x/callback",
     } = (req.body ?? {}) as { redirect?: string };

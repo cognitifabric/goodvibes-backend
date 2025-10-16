@@ -24,7 +24,7 @@ import EmailService from "./services/Email.service"
 
 const app = express()
 
-const allowedOrigins = [process.env.APP_ORIGIN || "http://localhost:3000"];
+const allowedOrigins = [process.env.APP_ORIGIN || "https://montana-kinase-raw-collectors.trycloudflare.com"];
 
 app.use(cors({ origin: allowedOrigins, credentials: true })) // if needed for cookies/auth
 app.use(express.json())

@@ -12,19 +12,22 @@ import { SpotifySearchSchema } from "../interfaces/search.interface";
 
 
 const STATE_PREFIX = "spotify_state:";
-const STATE_TTL = 600; // 10 minutes
+const STATE_TTL = 600; // 10 minute
+// NOTE: temporary playlist / queue logic moved to Set.controller to keep set-related actions together.
 
 @controller("/account")
 export default class SpotifyController implements interfaces.Controller {
 
   constructor(public readonly user: UserService, public readonly spotify: SpotifyService, public readonly tokensRepo: SpotifyTokenRepository) { }
 
-  // Step 1: redirect the user to Spotify
-  @httpGet("/authorize/spotify", AuthMiddleware)
-  async spotifyAuthorization(req: Request, res: Response) {
+  // Allow POST when frontend wants to send user info (id/username) in the body
+  @httpPost("/authorize/spotify", AuthMiddleware)
+  async spotifyAuthorizationPost(req: Request, res: Response) {
 
-    // In a real app, use your authenticated app user id. For demo:
-    const userId = (req.query.userId as string) || "demo-user-123";
+    // Prefer explicit userId sent in body, fall back to query or demo id
+    const bodyUserId = (req.body && (req.body.id || req.body.username)) as string | undefined;
+    const userId = bodyUserId || (req.query.userId as string) || "demo-user-123";
+
     const state = this.spotify.generateState() + ":" + userId;
 
     // Store state in Redis instead of cookie
@@ -33,33 +36,58 @@ export default class SpotifyController implements interfaces.Controller {
       NX: true,      // only set if not exists
     });
 
-    const url = this.spotify.getAuthorizedUrl(state);
-    // For Postman, you can return the URL; for browser, redirect:
-    if (req.headers["user-agent"]?.includes("Postman")) {
-      return res.json({ authorize_url: url });
+    // allow forcing consent: accept showDialog in body or query
+    const showDialog =
+      (req.body && (req.body.showDialog === true || req.body.showDialog === "true")) ||
+      (req.query && (req.query.showDialog === "true" || req.query.show_dialog === "true" || req.query.showDialog === "1"));
+
+    const url = this.spotify.getAuthorizedUrl(state, { showDialog: !!showDialog });
+
+    // If the request is an XHR (frontend requesting JSON) or explicitly asks for JSON, return the URL
+    const isXhr = (req.headers["x-requested-with"] as string | undefined) === "XMLHttpRequest" || (req.headers.accept || "").includes("application/json");
+    if (isXhr || req.headers["user-agent"]?.includes("Postman")) {
+      return res.json({ authorizeUrl: url });
     }
 
     return res.redirect(url);
-
   }
 
   // Step 2: Spotify redirects here with ?code=...&state=...
   @httpGet("/authorize/spotify/callback")
   async spotifyCallback(req: Request, res: Response) {
     const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
-    if (error) return res.status(400).json({ error });
-    if (!state) return res.status(400).json({ error: "Missing state" });
+
+    const isXhr = (req.headers["x-requested-with"] as string | undefined) === "XMLHttpRequest" || (req.headers.accept || "").includes("application/json");
+
+    const FRONTEND = (process.env.FRONTEND_BASE || process.env.NEXT_PUBLIC_FRONTEND_BASE || "http://localhost:3000").replace(/\/$/, "");
+
+    if (error) {
+      if (isXhr) return res.status(400).json({ error });
+      return res.redirect(`${FRONTEND}/dashboard?spotify=error&message=${encodeURIComponent(String(error))}`);
+    }
+
+    if (!state) {
+      if (isXhr) return res.status(400).json({ error: "Missing state" });
+      return res.redirect(`${FRONTEND}/dashboard?spotify=error&message=${encodeURIComponent("Missing state")}`);
+    }
 
     // Atomically consume state from Redis
     const key = `${STATE_PREFIX}${state}`;
     const appUserId = await redisClient.get(key);
     await redisClient.del(key); // one-time use
-    if (!appUserId) return res.status(400).json({ error: "Invalid or expired state" });
+
+    if (!appUserId) {
+      if (isXhr) return res.status(400).json({ error: "Invalid or expired state" });
+      return res.redirect(`${FRONTEND}/dashboard?spotify=error&message=${encodeURIComponent("Invalid or expired state")}`);
+    }
 
     try {
 
       // 1) exchange code -> tokens (access + refresh + expires_at)
       const tokens = await this.spotify.exchangeCodeForTokens(code!);
+
+      // console.log("exchanged tokens", tokens);
+
       await this.tokensRepo.saveTokens(appUserId, tokens);
 
       // 2) fetch Spotify /me with the fresh access token
@@ -68,14 +96,20 @@ export default class SpotifyController implements interfaces.Controller {
       // 3) persist spotifyUserId on our user
       await this.user.setSpotifyUserId(appUserId, me.id);
 
-      console.log("Spotify linked", { appUserId, spotifyUserId: me.id });
+      if (isXhr) {
+        return res.json({ message: "Spotify linked", userId: appUserId, spotifyUserId: me.id });
+      }
 
-      return res.json({ message: "Spotify linked", userId: appUserId, spotifyUserId: me.id });
+      // Redirect browser back to the frontend dashboard with a success indicator
+      const redirectUrl = `${FRONTEND}/dashboard?spotify=success&userId=${encodeURIComponent(appUserId)}&spotifyUserId=${encodeURIComponent(me.id)}`;
+      return res.redirect(redirectUrl);
 
     } catch (e: any) {
 
       console.log("ERROR exchanging code", e);
-      return res.status(500).json({ error: e.message ?? "Token exchange failed" });
+      const msg = e?.message ?? "Token exchange failed";
+      if (isXhr) return res.status(500).json({ error: msg });
+      return res.redirect(`${FRONTEND}/dashboard?spotify=error&message=${encodeURIComponent(String(msg))}`);
 
     }
 
@@ -89,10 +123,17 @@ export default class SpotifyController implements interfaces.Controller {
       const accessToken = await this.spotify.ensureAccessToken(appUserId);
       const me = await this.spotify.getCurrentUserProfile(accessToken);
 
+      // Read stored token metadata (no tokens returned)
+      const tokens = await this.tokensRepo.getTokens(appUserId);
+      const tokenInfo = tokens
+        ? { expiresAt: (tokens as any).expires_at ?? null }
+        : null;
+
       // keep DB spotifyUserId synced if changed
       await this.user.ensureSpotifyId(appUserId, me.id);
 
-      return res.json(me);
+      return res.json({ profile: me, tokenInfo });
+
     } catch (e: any) {
       return res.status(401).json({ error: e.message ?? "Unauthorized" });
     }
@@ -101,12 +142,19 @@ export default class SpotifyController implements interfaces.Controller {
 
   @httpPost("/spotify/search", AuthMiddleware)
   async searchTracks(req: Request, res: Response) {
+
     try {
       const body = await SpotifySearchSchema.parseAsync(req.body);
       const appUserId = req.user!.id; // from AuthMiddleware
       const result = await this.spotify.searchTracks(appUserId, body);
+
+      // console.log("Spotify search result", result);
+
       return res.json(result);
     } catch (err: any) {
+
+      console.log("error", err)
+
       if (err?.issues) {
         return res.status(400).json({
           error: "ValidationError",
@@ -117,6 +165,67 @@ export default class SpotifyController implements interfaces.Controller {
         });
       }
       return res.status(400).json({ error: err.message ?? "Search failed" });
+    }
+  }
+
+
+  @httpPost("/spotify/play", AuthMiddleware)
+  async playTrack(req: Request, res: Response) {
+    try {
+      const { trackId, deviceId } = req.body as { trackId?: string; deviceId?: string };
+      if (!trackId) return res.status(400).json({ error: "Missing trackId" });
+
+      const appUserId = req.user!.id;
+      // ensure we have a valid access token (service will refresh if needed)
+      const accessToken = await this.spotify.ensureAccessToken(appUserId);
+
+      let targetDeviceId = deviceId;
+
+      // If no device specified, try to find one
+      if (!targetDeviceId) {
+        const devicesResp = await fetch("https://api.spotify.com/v1/me/player/devices", {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+        });
+
+        if (!devicesResp.ok) {
+          const text = await devicesResp.text().catch(() => "");
+          return res.status(502).json({ error: "Failed to query Spotify devices", details: text });
+        }
+
+        const devicesBody = await devicesResp.json().catch(() => ({ devices: [] }));
+        const available = (devicesBody.devices || []) as any[];
+
+        if (!available.length) {
+          return res.status(404).json({
+            error: "No active Spotify devices",
+            message: "Open Spotify on a device (phone/desktop) or pass a deviceId to target.",
+          });
+        }
+        targetDeviceId = available[0].id;
+      }
+
+      // Start playback on the target device
+      // targetDeviceId is guaranteed to be set above (we returned 404 if none),
+      // use non-null assertion to satisfy TypeScript
+      const playUrl = `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(targetDeviceId!)}`;
+      const playResp = await fetch(playUrl, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
+      });
+
+      if (![204, 202, 200].includes(playResp.status)) {
+        const details = await playResp.text().catch(() => "");
+        return res.status(playResp.status).json({ error: "Spotify play failed", details });
+      }
+
+      return res.json({ ok: true, deviceId: targetDeviceId });
+    } catch (err: any) {
+      console.error("playTrack error", err);
+      return res.status(500).json({ error: err?.message ?? "Internal Server Error" });
     }
   }
 

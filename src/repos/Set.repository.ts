@@ -3,6 +3,8 @@ import { injectable } from "inversify";
 import { Set, SetDoc } from "../models/set.model";
 import { ICreateSetInput } from "../interfaces/set.interface";
 import { Types } from "mongoose";
+import { Set as SetModel } from "../models/set.model";
+import type { SetSong } from "../models/set.model";
 
 @injectable()
 export default class SetRepository {
@@ -38,8 +40,13 @@ export default class SetRepository {
     return !!set;
   }
 
-  async setSongs(setId: string, songs: string[]) {
-    await Set.updateOne({ _id: setId }, { $set: { songs } }).exec();
+  // Accept an array of song objects (SetSong[]) instead of string[] ids.
+  async setSongs(setId: string, songs: SetSong[]) {
+    return SetModel.findByIdAndUpdate(
+      setId,
+      { $set: { songs } },
+      { new: true, runValidators: true }
+    ).lean();
   }
 
   async updateBasic(setId: string, patch: { name?: string; description?: string | null; tags?: string[] }) {

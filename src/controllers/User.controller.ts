@@ -8,10 +8,11 @@ import { makeCodeVerifier, makeCodeChallengeS256, makeState } from "../utils/pkc
 import { redisClient } from "../infra/redis";
 import axios from 'axios'
 
-
 import UserService from "../services/User.service"
 import AuthTokenService from "../services/AuthToken.service"
 import UserRepository from "../repos/User.repository"
+import User from "../models/user.model"
+import { AuthMiddleware } from "../middleware/Auth.middleware"
 
 const STATE_PREFIX = "x_oauth_state:";
 const STATE_TTL = 10 * 60; // 10 min
@@ -188,9 +189,37 @@ export default class UserController implements interfaces.Controller {
 
   @httpPost("/auth/logout")
   async logout(_req: Request, res: Response) {
+    console.log("Logging out");
     this.auth.clearSessionCookie(res);
     return res.json({ ok: true });
   }
 
+  // Return a full user doc (populates referenced sets). Request body: { userId: string }
+  // Protected route so only authenticated callers can request user data.
+  @httpPost("/by-id", AuthMiddleware)
+  async byId(req: Request, res: Response) {
+    try {
+      const { userId } = req.body as { userId?: string };
+      if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+      // Populate referenced sets. identities is embedded so will be included.
+      const u = await User.findById(userId)
+        .populate({ path: "sets", model: "Set" })
+        .lean();
+
+      if (!u) return res.status(404).json({ error: "User not found" });
+
+      // Remove sensitive fields before returning
+      // (passwordHash may be undefined already, remove just in case)
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { passwordHash, ...safe } = u as any;
+
+      return res.json(safe);
+
+    } catch (err: any) {
+      console.error("UserController.byId error", err);
+      return res.status(500).json({ error: err?.message ?? "Failed to fetch user" });
+    }
+  }
 
 }

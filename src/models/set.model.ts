@@ -14,11 +14,20 @@ export type SetSuggestion = {
   reviewer?: Types.ObjectId;
 };
 
+export type SetSong = {
+  id: string;
+  title: string;
+  artists?: string;
+  image?: string;
+};
+
 export interface SetDoc {
   _id: Types.ObjectId;
   name: string;
   description?: string;
-  songs: string[];
+  // songs are stored as an array of song objects now
+  songs: SetSong[];
+  images?: string[]; // persisted images URLs
   suggestions: SetSuggestion[];
   lovedBy: Types.ObjectId[];
   collaborators: Types.ObjectId[];
@@ -43,11 +52,23 @@ const SuggestionSchema = new Schema<SetSuggestion>(
   { _id: true, timestamps: { createdAt: "createdAt", updatedAt: false } }
 );
 
+const SongSchema = new Schema(
+  {
+    id: { type: String, required: true },
+    title: { type: String, required: true },
+    artists: String,
+    image: String,
+  },
+  { _id: false }
+);
+
 const SetSchema = new Schema<SetDoc>(
   {
     name: { type: String, required: true },
     description: String,
-    songs: { type: [String], default: [] },
+    // store song objects
+    songs: { type: [SongSchema], default: [] },
+    images: { type: [String], default: [] },
     suggestions: { type: [SuggestionSchema], default: [] },
     lovedBy: { type: [Schema.Types.ObjectId], ref: "User", default: [] },
     collaborators: [{ type: Schema.Types.ObjectId, ref: "User" }],
