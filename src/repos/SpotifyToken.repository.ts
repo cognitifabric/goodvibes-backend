@@ -18,6 +18,7 @@ export default class SpotifyTokenRepository {
   }
 
   async saveTokens(userId: string, tokens: SpotifyTokens) {
+    console.log("Save tokens", this.key(userId))
     const key = this.key(userId);
     const payload = JSON.stringify(tokens);
     if (OPTIONAL_TTL_SECONDS > 0) {
@@ -28,6 +29,7 @@ export default class SpotifyTokenRepository {
   }
 
   async getTokens(userId: string): Promise<SpotifyTokens | undefined> {
+    console.log("get tokens", this.key(userId))
     const raw = await redisClient.get(this.key(userId));
     if (!raw) return undefined;
     try {
@@ -51,6 +53,13 @@ export default class SpotifyTokenRepository {
     } else {
       await redisClient.set(key, JSON.stringify(merged));
     }
+  }
+
+  // Delete all stored spotify tokens for a user
+  // Returns true if deletion was attempted (redis.del returns number of keys removed)
+  async deleteTokens(userId: string): Promise<number> {
+    const key = this.key(userId);
+    return await redisClient.del(key);
   }
 
 }

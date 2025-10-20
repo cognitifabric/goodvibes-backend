@@ -1,7 +1,7 @@
 // src/controllers/Set.controller.ts
 import "reflect-metadata";
 import { Request, Response } from "express";
-import { controller, httpPost, httpDelete, httpPatch, interfaces } from "inversify-express-utils";
+import { controller, httpPost, httpDelete, httpPatch, httpGet, interfaces } from "inversify-express-utils";
 import { AuthMiddleware } from "../middleware/Auth.middleware";
 import SetService from "../services/Set.service";
 import SpotifyService from "../services/Spotify.service";
@@ -12,11 +12,15 @@ import { CreateSetSchema } from "../interfaces/set.interface";
 import { AddSongsSchema } from "../interfaces/setEdit.interface";
 import { ReplaceSongsSchema } from "../interfaces/replaceSongs.interface";
 import { UpdateSetSchema } from "../interfaces/set.update.interface";
+import { Set } from "../models/set.model";
 
 type RemoveSongsBody = { songs: string[] };
 
 const TEMP_PLAYLIST_PREFIX = "spotify_temp_playlist:"; // per-app-user temp playlist id (Redis)
-const TEMP_PLAYLIST_TTL = 60 * 60 * 6; // 6 hours
+// Keep temporary playlist reference for several days so we can clean up & replace it later.
+// Previously 6 hours — that expired overnight and the old playlist id was lost.
+// Use 7 days (in seconds) to allow replacing the temp playlist across days.
+const TEMP_PLAYLIST_TTL = 60 * 60 * 24 * 7; // 7 days
 
 @controller("/sets")
 export default class SetController implements interfaces.Controller {
@@ -77,7 +81,10 @@ export default class SetController implements interfaces.Controller {
       const { setId } = req.params;
       const userId = req.user!.id;
 
-      const result = await this.set.replaceSongs(setId, userId, body.songs);
+      // normalize to array of ids
+      const songIds = (body.songs || []).map((s: any) => (typeof s === "string" ? s : s.id));
+
+      const result = await this.set.replaceSongs(setId, userId, songIds);
       res.json(result);
     } catch (err: any) {
       if (err?.issues) {
@@ -108,6 +115,44 @@ export default class SetController implements interfaces.Controller {
         err?.message === "Forbidden" ? 403 :
           err?.message === "Set not found" ? 404 : 400;
       return res.status(status).json({ error: err.message ?? "Update failed" });
+    }
+  }
+
+  // GET /sets?sort=recent|loved|collab&tag=tagName&limit=100
+  @httpGet("/")
+  async list(req: Request, res: Response) {
+    try {
+      const { sort = "recent", tag, limit } = req.query as any;
+      const q: any = {};
+      if (tag) q.tags = tag;
+
+      // build query and populate referenced user fields
+      let query = Set.find(q)
+        .populate("createdBy", "name displayName email")
+        .populate("collaborators", "name displayName")
+        .populate("lovedBy", "_id")
+        .lean();
+
+      let docs: any[] = await query.exec();
+
+      // sort in-memory (ok for typical result sizes) — adjust to aggregation for large collections
+      if (sort === "recent") {
+        docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      } else if (sort === "loved") {
+        docs.sort((a, b) => (b.lovedBy?.length || 0) - (a.lovedBy?.length || 0));
+      } else if (sort === "collab") {
+        docs.sort((a, b) => (b.collaborators?.length || 0) - (a.collaborators?.length || 0));
+      }
+
+      const max = Math.min(Number(limit) || 200, 1000);
+      docs = docs.slice(0, max);
+
+      const tags = await Set.distinct("tags");
+
+      return res.json({ sets: docs, tags });
+    } catch (err: any) {
+      console.error("List sets error", err);
+      return res.status(500).json({ error: err.message ?? "Failed to list sets" });
     }
   }
 
@@ -258,6 +303,61 @@ export default class SetController implements interfaces.Controller {
     } catch (err: any) {
       console.error("queueSet (playlist) error", err);
       return res.status(500).json({ error: err?.message ?? "Internal Server Error" });
+    }
+
+
+  }
+
+  // PATCH /sets/:setId/full
+  // Update metadata (name/description/tags) and replace full song list in one atomic request.
+  @httpPatch("/:setId/full", AuthMiddleware)
+  async updateFull(req: Request, res: Response) {
+
+    try {
+      const { setId } = req.params;
+      const userId = req.user!.id;
+      const body = req.body || {};
+
+      // Validate metadata and songs separately using existing schemas
+      const meta = await UpdateSetSchema.parseAsync(body);
+      // allow song objects or ids
+      const songsPayload = await ReplaceSongsSchema.parseAsync({ songs: Array.isArray(body.songs) ? body.songs : [] });
+
+      // Update metadata
+      await this.set.updateSetBasic(setId, userId, {
+        name: meta.name,
+        description: meta.description ?? null,
+        tags: meta.tags ?? [],
+      });
+
+      // Normalize songs to ids for replaceSongs service
+      const songIds = (songsPayload.songs || []).map((s: any) => (typeof s === "string" ? s : s.id));
+
+      // Replace songs (will validate editor permissions inside service)
+      await this.set.replaceSongs(setId, userId, songIds);
+
+      // Re-load the persisted set from DB and return it (ensure client sees saved state)
+      const updatedDoc = await Set.findById(setId)
+        .populate("createdBy", "name displayName email")
+        .populate("collaborators", "name displayName")
+        .populate("lovedBy", "_id")
+        .lean();
+
+      if (!updatedDoc) {
+        return res.status(404).json({ error: "Set not found after update" });
+      }
+
+      return res.json(updatedDoc);
+    } catch (err: any) {
+      if (err?.issues) {
+        return res.status(400).json({
+          error: "ValidationError",
+          issues: err.issues.map((i: any) => ({ path: i.path.join("."), message: i.message })),
+        });
+      }
+      const status = err?.message === "Forbidden" ? 403 : err?.message === "Set not found" ? 404 : 500;
+      console.error("updateFull error", err);
+      return res.status(status).json({ error: err?.message ?? "Update failed" });
     }
   }
 

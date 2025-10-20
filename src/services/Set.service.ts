@@ -81,15 +81,22 @@ export default class SetService {
 
     // 4) append only valid new IDs, preserve order
     // Convert hydrated items to SetSong objects (be defensive about property names)
-    const toAdd: SetSong[] = hydrated.map((h: any) => ({
-      id: h.trackId,
-      title: h.title ?? h.name ?? h.trackName ?? "",
-      artists: Array.isArray(h.artists) ? h.artists.join(", ") : (h.artists ?? (h.artistName ?? "")),
-      image:
-        h.image ??
-        h.albumImage ??
-        (h.album && Array.isArray(h.album.images) && h.album.images[0] ? h.album.images[0].url : undefined),
-    })).filter(s => !!s.id);
+    const toAdd: SetSong[] = hydrated
+      .map((h: any) => {
+        // defensive normalization for various TrackCacheDoc shapes
+        const trackId = h?.trackId ?? h?.id ?? undefined;
+        const title = h?.title ?? h?.name ?? h?.trackName ?? "";
+        // Preserve the artists value as provided by the cache/backend (do not coerce)
+        const artists = h?.artists ?? h?.artistName ?? undefined;
+        const image =
+          h?.image ??
+          h?.albumImage ??
+          (h?.album && Array.isArray(h.album.images) && h.album.images[0] ? h.album.images[0].url : undefined);
+
+        if (!trackId) return null;
+        return { id: trackId, title, artists, image } as SetSong;
+      })
+      .filter((s): s is SetSong => !!s);
 
     const next: SetSong[] = current.concat(toAdd);
     await this.set.setSongs(setId, next);
@@ -97,7 +104,7 @@ export default class SetService {
     return { songs: next, added: toAdd.length, addedTracks: hydrated, skipped };
   }
 
-  // src/services/Set.service.ts (add)
+  // src/services/Set.service.ts (replaceSongs)
   async replaceSongs(setId: string, userId: string, finalOrder: string[]) {
     await this.assertCanEdit(setId, userId);
 
@@ -107,27 +114,70 @@ export default class SetService {
     const current: SetSong[] = (set.songs ?? []) as SetSong[];
     const currentIds = current.map(s => s.id);
 
-    // Only allow reordering/removal here (no additions via this endpoint).
-    // Drop any IDs that aren’t in current; de-dupe while preserving order.
-    const nextIds: string[] = [];
+    // Build map of existing song objects
+    const idToSong = new Map(current.map(s => [s.id, s]));
+
+    // Determine which ids in finalOrder are new (not in current)
+    const toHydrateIds: string[] = [];
+    const seen = new Set<string>();
     for (const id of finalOrder) {
-      if (currentIds.includes(id) && !nextIds.includes(id)) nextIds.push(id);
+      const nid = normalize(id);
+      if (!seen.has(nid)) {
+        seen.add(nid);
+        if (!currentIds.includes(nid)) toHydrateIds.push(nid);
+      }
     }
 
-    // Map ids back to song objects preserving metadata
-    const idToSong = new Map(current.map(s => [s.id, s]));
-    const next: SetSong[] = nextIds.map(id => idToSong.get(id)!).filter(Boolean);
+    // Hydrate any new ids via TrackCache/Spotify
+    let hydratedMap = new Map<string, any>();
+    if (toHydrateIds.length > 0) {
+      const accessToken = await this.spotify.ensureAccessToken(userId);
+      try {
+        const hydrated = await this.cache.getManyWithHydrate(accessToken, toHydrateIds); // TrackCacheDoc[]
+        for (const h of hydrated) {
+          if (!h) continue;
+          const trackId = (h as any).trackId ?? (h as any).id;
+          if (!trackId) continue;
+          const title = (h as any).title ?? (h as any).name ?? (h as any).trackName ?? "";
+          // Preserve artists value as-is (string, array or object) — don't coerce
+          const artists = (h as any).artists ?? (h as any).artistName ?? undefined;
+          const image =
+            (h as any).image ??
+            (h as any).albumImage ??
+            ((h as any).album && Array.isArray((h as any).album.images) && (h as any).album.images[0]
+              ? (h as any).album.images[0].url
+              : undefined);
 
-    console.log("currentIds", currentIds, "finalOrder", finalOrder, "nextIds", nextIds);
+          const songObj: SetSong = { id: trackId, title, artists, image };
+          hydratedMap.set(trackId, songObj);
+        }
+      } catch (err) {
+        console.warn("replaceSongs: hydration failed for new ids", toHydrateIds, err);
+        // proceed — missing hydrated items will be skipped below
+      }
+    }
 
-    // (Optional strict mode)
-    // If finalOrder contains any id not in current, treat as error:
-    // const unknown = finalOrder.filter(id => !currentSet.has(id));
-    // if (unknown.length) throw new Error(`Unknown ids in final order: ${unknown.join(",")}`);
+    // Build next array of SetSong objects in the requested order, skipping unknown ids
+    const next: SetSong[] = [];
+    const nextIds: string[] = [];
+    for (const rawId of finalOrder) {
+      const id = normalize(rawId);
+      if (nextIds.includes(id)) continue; // dedupe
+      let song = idToSong.get(id);
+      if (!song && hydratedMap.has(id)) song = hydratedMap.get(id);
+      if (song) {
+        next.push(song);
+        nextIds.push(id);
+      } else {
+        // Unknown id (neither in current nor hydrated) -> skip (or optionally throw)
+        console.warn("replaceSongs: unknown track id skipped", id);
+      }
+    }
 
     const removed = current.filter(s => !nextIds.includes(s.id));
-    const orderChanged = JSON.stringify(currentIds) !== JSON.stringify(nextIds);
+    const orderChanged = JSON.stringify(current.map(s => s.id)) !== JSON.stringify(nextIds);
 
+    // persist full song objects
     await this.set.setSongs(setId, next);
 
     return {
@@ -137,7 +187,6 @@ export default class SetService {
       orderChanged,
       length: next.length,
     };
-
   }
 
   async updateSetBasic(setId: string, userId: string, patch: { name?: string; description?: string | null; tags?: string[] }) {

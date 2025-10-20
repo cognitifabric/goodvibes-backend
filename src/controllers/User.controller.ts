@@ -12,6 +12,7 @@ import UserService from "../services/User.service"
 import AuthTokenService from "../services/AuthToken.service"
 import UserRepository from "../repos/User.repository"
 import User from "../models/user.model"
+import SpotifyTokenRepository from "../repos/SpotifyToken.repository";
 import { AuthMiddleware } from "../middleware/Auth.middleware"
 
 const STATE_PREFIX = "x_oauth_state:";
@@ -20,7 +21,7 @@ const STATE_TTL = 10 * 60; // 10 min
 @controller("/user")
 export default class UserController implements interfaces.Controller {
 
-  constructor(private user: UserService, private auth: AuthTokenService, private userRepo: UserRepository) { }
+  constructor(private user: UserService, private auth: AuthTokenService, private userRepo: UserRepository, private tokensRepo: SpotifyTokenRepository) { }
 
   @httpPost("/auth/signup")
   async signup(req: Request, res: Response) {
@@ -187,11 +188,30 @@ export default class UserController implements interfaces.Controller {
     }
   }
 
-  @httpPost("/auth/logout")
-  async logout(_req: Request, res: Response) {
-    console.log("Logging out");
-    this.auth.clearSessionCookie(res);
-    return res.json({ ok: true });
+  @httpPost("/auth/logout", AuthMiddleware)
+  async logout(req: Request, res: Response) {
+
+    try {
+      // identify authenticated user from AuthMiddleware
+      const appUserId = req.user?.id;
+      // clear session cookie
+      console.log("Logging out", appUserId);
+      this.auth.clearSessionCookie(res);
+
+      // attempt to remove any stored spotify tokens for the user (non-fatal)
+      if (appUserId) {
+        try {
+          await this.tokensRepo.deleteTokens(appUserId);
+        } catch (err) {
+          console.warn("Failed to remove spotify tokens for", appUserId, err);
+        }
+      }
+
+      return res.json({ ok: true });
+    } catch (err: any) {
+      console.error("UserController.logout error", err);
+      return res.status(500).json({ error: err?.message ?? "Logout failed" });
+    }
   }
 
   // Return a full user doc (populates referenced sets). Request body: { userId: string }

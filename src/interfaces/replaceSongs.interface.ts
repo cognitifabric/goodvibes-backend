@@ -1,7 +1,10 @@
 // src/schemas/set.songs.schema.ts
 import { z } from "zod";
+import { SongObject } from "./set.interface";
 
 export const ReplaceSongsSchema = z.object({
-  songs: z.array(z.string()).optional().default([]), // final order after user edits
+  // allow either an array of song ids (string) or full SongObject (same shape as create)
+  songs: z.array(z.union([z.string().min(1), SongObject])).optional().default([]),
 });
-export interface IReplaceSongsInput extends z.infer<typeof ReplaceSongsSchema> { }
+
+export type IReplaceSongsInput = z.infer<typeof ReplaceSongsSchema>;

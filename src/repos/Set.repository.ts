@@ -42,9 +42,30 @@ export default class SetRepository {
 
   // Accept an array of song objects (SetSong[]) instead of string[] ids.
   async setSongs(setId: string, songs: SetSong[]) {
+    // sanitize artists to a string to match schema expectations
+    const normalizeArtists = (a: any): string | undefined => {
+      if (a == null) return undefined;
+      if (typeof a === "string") return a;
+      if (Array.isArray(a)) {
+        return a
+          .map((it) => (typeof it === "string" ? it : it?.name ?? it?.artist ?? String(it)))
+          .filter(Boolean)
+          .join(", ");
+      }
+      if (typeof a === "object") return a.name ?? a.artist ?? JSON.stringify(a);
+      return String(a);
+    };
+
+    const sanitized = (songs || []).map((s) => ({
+      id: s.id,
+      title: s.title,
+      artists: normalizeArtists((s as any).artists),
+      image: (s as any).image,
+    }));
+
     return SetModel.findByIdAndUpdate(
       setId,
-      { $set: { songs } },
+      { $set: { songs: sanitized } },
       { new: true, runValidators: true }
     ).lean();
   }

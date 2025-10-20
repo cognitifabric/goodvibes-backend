@@ -24,9 +24,16 @@ export default class SpotifyController implements interfaces.Controller {
   @httpPost("/authorize/spotify", AuthMiddleware)
   async spotifyAuthorizationPost(req: Request, res: Response) {
 
-    // Prefer explicit userId sent in body, fall back to query or demo id
+    // Prefer authenticated user id (set by AuthMiddleware), then body/query.
+    // Don't fall back to an arbitrary demo id that will break DB operations.
     const bodyUserId = (req.body && (req.body.id || req.body.username)) as string | undefined;
-    const userId = bodyUserId || (req.query.userId as string) || "demo-user-123";
+    const authUserId = (req as any).user?.id as string | undefined;
+    const userId = authUserId ?? bodyUserId ?? (req.query.userId as string | undefined);
+
+    if (!userId) {
+      // client should be authenticated or include a valid userId
+      return res.status(400).json({ error: "Missing user id for Spotify authorization" });
+    }
 
     const state = this.spotify.generateState() + ":" + userId;
 
@@ -86,9 +93,16 @@ export default class SpotifyController implements interfaces.Controller {
       // 1) exchange code -> tokens (access + refresh + expires_at)
       const tokens = await this.spotify.exchangeCodeForTokens(code!);
 
-      // console.log("exchanged tokens", tokens);
-
+      // persist tokens under the appUserId
       await this.tokensRepo.saveTokens(appUserId, tokens);
+
+      // VERIFY: read back tokens immediately and log diagnostic info to ensure key matches
+      try {
+        const savedTokens = await this.tokensRepo.getTokens(appUserId);
+        console.log("spotifyCallback: saved tokens for", appUserId, savedTokens ? "OK" : "MISSING");
+      } catch (vErr) {
+        console.error("spotifyCallback: failed to verify saved tokens for", appUserId, vErr);
+      }
 
       // 2) fetch Spotify /me with the fresh access token
       const me = await this.spotify.getCurrentUserProfile(tokens.access_token);
@@ -118,8 +132,18 @@ export default class SpotifyController implements interfaces.Controller {
   // protected /spotify/me that also keeps DB in sync
   @httpGet("/spotify/me", AuthMiddleware)
   async spotifyMe(req: Request, res: Response) {
+
     const appUserId = req.user!.id;
     try {
+      // First check whether tokens exist in storage for this user.
+      // If no tokens are present, return 200 with tokenInfo: null so the frontend
+      // can show "not connected" without treating this as a hard 401.
+      const stored = await this.tokensRepo.getTokens(appUserId);
+      if (!stored) {
+        console.log("spotifyMe: no stored tokens for", appUserId);
+        return res.json({ profile: null, tokenInfo: null });
+      }
+
       const accessToken = await this.spotify.ensureAccessToken(appUserId);
       const me = await this.spotify.getCurrentUserProfile(accessToken);
 
@@ -135,6 +159,8 @@ export default class SpotifyController implements interfaces.Controller {
       return res.json({ profile: me, tokenInfo });
 
     } catch (e: any) {
+      console.log(e)
+      // If ensureAccessToken failed, surface 401 otherwise return error message
       return res.status(401).json({ error: e.message ?? "Unauthorized" });
     }
   }
