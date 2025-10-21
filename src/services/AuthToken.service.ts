@@ -56,13 +56,13 @@ export default class AuthTokenService {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       samesite: "none",
-      domain: process.env.APP_ORIGIN ?? undefined,
+      domain: process.env.COOKIE_DOMAIN ?? undefined,
       maxAge,
       path: "/",
     };
     // allow overriding domain / samesite via env in production
     cookieOpts.sameSite = process.env.COOKIE_SAMESITE ?? (process.env.NODE_ENV === "production" ? "none" : "lax");
-    if (process.env.APP_ORIGIN) cookieOpts.domain = process.env.APP_ORIGIN;
+    if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
     res.cookie("gv_session", token, cookieOpts);
   }
 
