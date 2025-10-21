@@ -8,7 +8,7 @@ const connectDB = async () => {
 
     mongoose.set("strictQuery", true)
     const conn = await mongoose.connect(
-      process.env.NODE_ENV !== 'development'
+      process.env.NODE_ENV === 'production'
         ?
         `mongodb+srv://${process.env.DATABASE_USERNAME}:${process.env.DATABASE_PASSWORD}@${process.env.DATABASE_URL}?retryWrites=true&w=majority&appName=${process.env.DATABASE_NAME}`
         :
