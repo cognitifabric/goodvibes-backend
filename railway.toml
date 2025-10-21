@@ -2,7 +2,7 @@
 [build]
 builder = "RAILPACK"
 installCommand = "npm ci --legacy-peer-deps"
-buildCommand = "npm start build"
+buildCommand = "npm run start"
 
 [deploy]
 startCommand = "node dist/index.js"
