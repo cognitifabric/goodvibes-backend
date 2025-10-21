@@ -1,0 +1,8 @@
+# railway.toml
+[build]
+builder = "RAILPACK"
+installCommand = "npm ci --legacy-peer-deps"
+buildCommand = "npm run build"
+
+[deploy]
+startCommand = "node dist/index.js"
