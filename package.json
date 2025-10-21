@@ -4,6 +4,7 @@
   "description": "",
   "main": "app.js",
   "scripts": {
+    "build": "tsc",
     "start": "tsc && node dist/index.js",
     "dev": "nodemon --watch src --ext ts,tsx --ignore dist --exec \"npx ts-node src/index.ts\"",
     "test:controller": "jest --forceExit --detectOpenHandles --watchAll --maxWorkers=1 src/controllers/User.controller.spec.ts",
