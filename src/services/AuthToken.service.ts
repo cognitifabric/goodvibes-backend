@@ -52,17 +52,22 @@ export default class AuthTokenService {
 
   setSessionCookie(res: Response, token: string, remember = true) {
     const maxAge = remember ? 30 * 24 * 3600 * 1000 : 7 * 24 * 3600 * 1000;
-    res.cookie("gv_session", token, {
+    const cookieOpts: any = {
       httpOnly: true,
-      sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
       maxAge,
       path: "/",
-    });
+    };
+    // allow overriding domain / samesite via env in production
+    cookieOpts.sameSite = process.env.COOKIE_SAMESITE ?? (process.env.NODE_ENV === "production" ? "none" : "lax");
+    if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
+    res.cookie("gv_session", token, cookieOpts);
   }
 
   clearSessionCookie(res: Response) {
-    res.clearCookie("gv_session", { path: "/" });
+    const opts: any = { path: "/" };
+    if (process.env.COOKIE_DOMAIN) opts.domain = process.env.COOKIE_DOMAIN;
+    res.clearCookie("gv_session", opts);
   }
 
   verify(token: string) {
