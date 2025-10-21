@@ -53,5 +53,27 @@ let server = new InversifyExpressServer(
 
 let appConfigured = server.build()
 
+// Health check / simple info endpoints
+// Respond on root (/) so visiting the API host directly shows the service is up.
+appConfigured.get("/", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8")
+  return res.send(
+    `<!doctype html>
+    <html>
+      <head><title>Aura & Vibes API</title></head>
+      <body style="font-family:system-ui,Segoe UI,Roboto,-apple-system,Arial;margin:30px">
+        <h1>Aura & Vibes API</h1>
+        <p>Server is running.</p>
+        <p>API root is mounted at <code>/api</code></p>
+      </body>
+    </html>`
+  )
+})
+
+// Also provide a machine-friendly JSON health endpoint at /api/health
+appConfigured.get("/api/health", (_req, res) => {
+  return res.json({ ok: true, service: "auraandvibes-api", time: new Date().toISOString() })
+})
+
 //// You need to avoid calling app when appConfigured listens when you run tests. So we don't listen in this file
 export { app, appConfigured }
