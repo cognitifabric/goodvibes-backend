@@ -66,7 +66,7 @@ export default class SpotifyController implements interfaces.Controller {
 
     const isXhr = (req.headers["x-requested-with"] as string | undefined) === "XMLHttpRequest" || (req.headers.accept || "").includes("application/json");
 
-    const FRONTEND = (process.env.FRONTEND_BASE || process.env.NEXT_PUBLIC_FRONTEND_BASE || "http://localhost:3000").replace(/\/$/, "");
+    const FRONTEND = (process.env.APP_ORIGIN || "http://localhost:3000").replace(/\/$/, "");
 
     if (error) {
       if (isXhr) return res.status(400).json({ error });
