@@ -52,23 +52,56 @@ export default class AuthTokenService {
 
   setSessionCookie(res: Response, token: string, remember = true) {
     const maxAge = remember ? 30 * 24 * 3600 * 1000 : 7 * 24 * 3600 * 1000;
+
+    // derive a valid cookie domain (hostname only). Prefer explicit COOKIE_DOMAIN, otherwise parse APP_ORIGIN.
+    let cookieDomain: string | undefined = undefined;
+    const rawDomain = (process.env.COOKIE_DOMAIN || "").trim();
+    if (rawDomain) {
+      // allow values like "https://auraandvibes.com", "auraandvibes.com", "localhost:3000"
+      try {
+        // try URL parsing first (handles protocol)
+        cookieDomain = new URL(rawDomain).hostname;
+      } catch {
+        // fallback: strip protocol and port if present
+        cookieDomain = rawDomain.replace(/^https?:\/\//, "").split(":")[0];
+      }
+      if (!cookieDomain) cookieDomain = undefined;
+    } else if (process.env.APP_ORIGIN) {
+      try {
+        cookieDomain = new URL(process.env.APP_ORIGIN).hostname;
+      } catch {
+        cookieDomain = undefined;
+      }
+    }
+
+    // optional: if you want cookie available on subdomains set COOKIE_LEADING_DOT=1 in env to add a leading dot
+    if (cookieDomain && process.env.COOKIE_LEADING_DOT === "1" && !cookieDomain.startsWith(".")) {
+      cookieDomain = `.${cookieDomain}`;
+    }
+
     const cookieOpts: any = {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      samesite: "none",
-      domain: process.env.COOKIE_DOMAIN ?? undefined,
+      sameSite: process.env.COOKIE_SAMESITE ?? (process.env.NODE_ENV === "production" ? "none" : "lax"),
       maxAge,
       path: "/",
     };
-    // allow overriding domain / samesite via env in production
-    cookieOpts.sameSite = process.env.COOKIE_SAMESITE ?? (process.env.NODE_ENV === "production" ? "none" : "lax");
-    if (process.env.COOKIE_DOMAIN) cookieOpts.domain = process.env.COOKIE_DOMAIN;
+    if (cookieDomain) cookieOpts.domain = cookieDomain;
+
     res.cookie("gv_session", token, cookieOpts);
   }
 
   clearSessionCookie(res: Response) {
     const opts: any = { path: "/" };
-    if (process.env.COOKIE_DOMAIN) opts.domain = process.env.COOKIE_DOMAIN;
+    // reuse same derivation logic: prefer COOKIE_DOMAIN, otherwise parse APP_ORIGIN
+    const rawDomain = (process.env.COOKIE_DOMAIN || "").trim();
+    let clearDomain: string | undefined = undefined;
+    if (rawDomain) {
+      try { clearDomain = new URL(rawDomain).hostname; } catch { clearDomain = rawDomain.replace(/^https?:\/\//, "").split(":")[0]; }
+    } else if (process.env.APP_ORIGIN) {
+      try { clearDomain = new URL(process.env.APP_ORIGIN).hostname; } catch { }
+    }
+    if (clearDomain) opts.domain = clearDomain;
     res.clearCookie("gv_session", opts);
   }
 
