@@ -10,7 +10,7 @@ const connectDB = async () => {
     const conn = await mongoose.connect(
       process.env.NODE_ENV === 'production'
         ?
-        `mongodb+srv://${process.env.DATABASE_USERNAME}:${process.env.DATABASE_PASSWORD}@${process.env.DATABASE_URL}?retryWrites=true&w=majority&appName=${process.env.DATABASE_NAME}`
+        `mongodb+srv://${process.env.DATABASE_USERNAME}:${process.env.DATABASE_PASSWORD}@${process.env.DATABASE_URL}${process.env.DATABASE_NAME}?retryWrites=true&w=majority&appName=${process.env.APP_NAME}`
         :
         "mongodb://127.0.0.1:27017/gooodvibez"
     )
