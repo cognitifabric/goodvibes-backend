@@ -20,6 +20,12 @@ export default class SetService {
   constructor(private set: SetRepository, private user: UserRepository, private spotify: SpotifyService, private cache: TrackServiceCache
   ) { }
 
+  // pick first up to 5 non-empty images from a songs array
+  private static imagesFromSongs(songs: SetSong[] | undefined): string[] {
+    if (!Array.isArray(songs) || songs.length === 0) return [];
+    return songs.map(s => (s as any)?.image).filter(Boolean).slice(0, 5);
+  }
+
   async createSet(userId: string, input: ICreateSetInput) {
     // build document payload explicitly so images/tags/songs are persisted
     const toSave = {
@@ -29,7 +35,8 @@ export default class SetService {
       songs: input.songs ?? [],
       tags: input.tags ?? [],
       collaborators: input.collaborators ?? [],
-      images: input.images ?? [],
+      // prefer provided images, otherwise derive from provided songs
+      images: (input.images && input.images.length ? input.images : (SetService.imagesFromSongs(input.songs ?? []))),
       createdBy: userId,
     };
 
@@ -99,7 +106,16 @@ export default class SetService {
       .filter((s): s is SetSong => !!s);
 
     const next: SetSong[] = current.concat(toAdd);
+    // persist songs and update images to reflect newest first-5 images
     await this.set.setSongs(setId, next);
+    try {
+      const imgs = SetService.imagesFromSongs(next);
+      if (imgs.length) {
+        await SetModel.findByIdAndUpdate(setId, { images: imgs }).exec();
+      }
+    } catch (e) {
+      console.warn("Failed to update set images after addSongs", e);
+    }
 
     return { songs: next, added: toAdd.length, addedTracks: hydrated, skipped };
   }
@@ -179,6 +195,13 @@ export default class SetService {
 
     // persist full song objects
     await this.set.setSongs(setId, next);
+    // update images to reflect new song order (first up-to-5 images)
+    try {
+      const imgs = SetService.imagesFromSongs(next);
+      await SetModel.findByIdAndUpdate(setId, { images: imgs }).exec();
+    } catch (e) {
+      console.warn("replaceSongs: failed to update images", e);
+    }
 
     return {
       songs: next,
@@ -189,21 +212,33 @@ export default class SetService {
     };
   }
 
-  async updateSetBasic(setId: string, userId: string, patch: { name?: string; description?: string | null; tags?: string[] }) {
+  async updateSetBasic(setId: string, userId: string, patch: { name?: string; description?: string | null; tags?: string[]; images?: string[] }) {
     await this.assertCanEdit(setId, userId);
 
     const exists = await this.set.findById(setId);
     if (!exists) throw new Error("Set not found");
 
-    const updated = await this.set.updateBasic(setId, patch);
+    // update basic fields via repository
+    const updated = await this.set.updateBasic(setId, {
+      name: patch.name,
+      description: patch.description ?? null,
+      tags: patch.tags ?? [],
+    });
     if (!updated) throw new Error("Set not found");
+
+    // if images provided, persist them as well
+    if (Array.isArray(patch.images)) {
+      try {
+        await SetModel.findByIdAndUpdate(setId, { images: patch.images }).exec();
+      } catch (e) {
+        console.warn("updateSetBasic: failed to persist images", e);
+      }
+    }
 
     // If you cache hydrated set views in Redis, bust here:
     // await this.cache.del(`set:view:${setId}`);
 
     return updated;
-
   }
-
 
 }

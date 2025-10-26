@@ -318,8 +318,15 @@ export default class SetController implements interfaces.Controller {
       const userId = req.user!.id;
       const body = req.body || {};
 
+      console.log("update", req.body)
+
       // Validate metadata and songs separately using existing schemas
       const meta = await UpdateSetSchema.parseAsync(body);
+      // read images array (optional) from body and sanitize to up-to-5 non-empty strings
+      const images = Array.isArray(body.images)
+        ? body.images.map((i: any) => (typeof i === "string" ? i.trim() : "")).filter(Boolean).slice(0, 5)
+        : undefined;
+
       // allow song objects or ids
       const songsPayload = await ReplaceSongsSchema.parseAsync({ songs: Array.isArray(body.songs) ? body.songs : [] });
 
@@ -328,6 +335,7 @@ export default class SetController implements interfaces.Controller {
         name: meta.name,
         description: meta.description ?? null,
         tags: meta.tags ?? [],
+        ...(images ? { images } : {}),
       });
 
       // Normalize songs to ids for replaceSongs service
