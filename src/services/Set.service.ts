@@ -120,8 +120,8 @@ export default class SetService {
     return { songs: next, added: toAdd.length, addedTracks: hydrated, skipped };
   }
 
-  // src/services/Set.service.ts (replaceSongs)
-  async replaceSongs(setId: string, userId: string, finalOrder: string[]) {
+  // finalOrder may be an array of string ids OR objects { id, title, artists, image }
+  async replaceSongs(setId: string, userId: string, finalOrder: (string | { id: string; title?: string; artists?: any; image?: string })[]) {
     await this.assertCanEdit(setId, userId);
 
     const set = await this.set.findById(setId);
@@ -132,16 +132,26 @@ export default class SetService {
 
     // Build map of existing song objects
     const idToSong = new Map(current.map(s => [s.id, s]));
+    // map of provided song objects in finalOrder (id -> object)
+    const providedSongMap = new Map<string, any>();
 
     // Determine which ids in finalOrder are new (not in current)
     const toHydrateIds: string[] = [];
     const seen = new Set<string>();
-    for (const id of finalOrder) {
-      const nid = normalize(id);
-      if (!seen.has(nid)) {
-        seen.add(nid);
-        if (!currentIds.includes(nid)) toHydrateIds.push(nid);
+    // normalize items and collect provided objects
+    const normalizedOrder: string[] = [];
+    for (const item of finalOrder) {
+      let rawId: string | undefined;
+      if (typeof item === "string") rawId = normalize(item);
+      else if (item && typeof item.id === "string") {
+        rawId = normalize(item.id);
+        providedSongMap.set(rawId, item);
       }
+      if (!rawId) continue;
+      if (seen.has(rawId)) continue;
+      seen.add(rawId);
+      normalizedOrder.push(rawId);
+      if (!currentIds.includes(rawId)) toHydrateIds.push(rawId);
     }
 
     // Hydrate any new ids via TrackCache/Spotify
@@ -176,16 +186,22 @@ export default class SetService {
     // Build next array of SetSong objects in the requested order, skipping unknown ids
     const next: SetSong[] = [];
     const nextIds: string[] = [];
-    for (const rawId of finalOrder) {
-      const id = normalize(rawId);
+    for (const id of normalizedOrder) {
       if (nextIds.includes(id)) continue; // dedupe
-      let song = idToSong.get(id);
+      // Prefer provided song object from request (keeps client-supplied image)
+      let song: SetSong | undefined = undefined;
+      if (providedSongMap.has(id)) {
+        const p = providedSongMap.get(id);
+        song = { id, title: p?.title ?? p?.name ?? "", artists: p?.artists ?? undefined, image: p?.image ?? undefined };
+      }
+      // fallback to existing stored song
+      if (!song && idToSong.has(id)) song = idToSong.get(id);
+      // fallback to hydrated data (from track cache/spotify)
       if (!song && hydratedMap.has(id)) song = hydratedMap.get(id);
       if (song) {
         next.push(song);
         nextIds.push(id);
       } else {
-        // Unknown id (neither in current nor hydrated) -> skip (or optionally throw)
         console.warn("replaceSongs: unknown track id skipped", id);
       }
     }

@@ -318,8 +318,6 @@ export default class SetController implements interfaces.Controller {
       const userId = req.user!.id;
       const body = req.body || {};
 
-      console.log("update", req.body)
-
       // Validate metadata and songs separately using existing schemas
       const meta = await UpdateSetSchema.parseAsync(body);
       // read images array (optional) from body and sanitize to up-to-5 non-empty strings
@@ -338,11 +336,31 @@ export default class SetController implements interfaces.Controller {
         ...(images ? { images } : {}),
       });
 
-      // Normalize songs to ids for replaceSongs service
-      const songIds = (songsPayload.songs || []).map((s: any) => (typeof s === "string" ? s : s.id));
+      // Pass full song items (string id or object { id, title, artists, image }) so provided images are preserved.
+      const songItems = (songsPayload.songs || []).map((s: any) => (typeof s === "string" ? s : { id: s.id, title: s.title, artists: s.artists, image: s.image }));
 
-      // Replace songs (will validate editor permissions inside service)
-      await this.set.replaceSongs(setId, userId, songIds);
+      // Replace songs (will validate editor permissions inside service). Service will prefer any provided song objects.
+      const replaceResult = await this.set.replaceSongs(setId, userId, songItems);
+
+      // Ensure images are persisted after songs update. Prefer explicit images from body,
+      // otherwise derive from the replaced songs (first up to 5 non-empty images).
+      const finalImages =
+        images && images.length
+          ? images
+          : Array.isArray(replaceResult?.songs)
+            ? (replaceResult.songs as any[])
+              .map((s) => (s && (s as any).image) || null)
+              .filter(Boolean)
+              .slice(0, 5)
+            : [];
+      if (finalImages && finalImages.length) {
+        try {
+          await Set.findByIdAndUpdate(setId, { images: finalImages }).exec();
+          console.log("updateFull: persisted images for set", setId, finalImages.length);
+        } catch (e) {
+          console.warn("updateFull: failed to persist images", e);
+        }
+      }
 
       // Re-load the persisted set from DB and return it (ensure client sees saved state)
       const updatedDoc = await Set.findById(setId)
